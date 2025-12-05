@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "SplitPal",
+    "slug": "splitpal",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "splitpal",
+    "icon": "./assets/splitpal.png",
+    "platforms": [
+      "android",
+      "ios",
+      "web"
+    ],
+    "sdkVersion": "51.0.0",
+    "jsEngine": "hermes",
+    "splash": {
+      "backgroundColor": "#ffffff"
+    },
+    "web": {
+      "favicon": "./assets/splitpal.png"
+    },
+    "android": {
+      "package": "com.splitpal.app",
+      "permissions": [],
+      "splash": {
+        "backgroundColor": "#ffffff"
+      }
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "experiments": {
+      "tsconfigPaths": true
+    },
+    "plugins": [
+      "./plugins/with-android-cleartext"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d5cc64e2-0b81-4c6f-9394-e078a0a70b11"
+      }
+    }
+  }
+}
