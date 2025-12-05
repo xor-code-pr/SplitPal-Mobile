@@ -1,5 +1,5 @@
-import React, {useEffect, useMemo, useState} from 'react';
-import {Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View} from 'react-native';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import {Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View} from 'react-native';
 import axios from 'axios';
 import {MaterialIcons} from '@expo/vector-icons';
 import {NativeStackScreenProps} from '@react-navigation/native-stack';
@@ -31,10 +31,64 @@ const buildEqualPercentages = (count: number): string[] => {
 const sanitizePercentInput = (value: string): string => {
   const digitsOnly = value.replace(/\D/g, '');
   if (!digitsOnly) {
-    return '';
+    return '0';
   }
   const numeric = Math.min(parseInt(digitsOnly, 10), 100);
   return String(numeric);
+};
+
+const normalizePercentValue = (value: number | string | null | undefined): string => {
+  if (value === null || value === undefined) {
+    return '0';
+  }
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric)) {
+    return '0';
+  }
+  const clamped = Math.max(0, Math.min(100, Math.round(numeric)));
+  return String(clamped);
+};
+
+const rebalanceSplitsToHundred = (rows: SplitFormRow[]): SplitFormRow[] => {
+  if (rows.length === 0) {
+    return rows;
+  }
+
+  const values = rows.map(row => {
+    const numeric = Number(row.sharePercent);
+    if (!Number.isFinite(numeric)) {
+      return 0;
+    }
+    return Math.max(0, Math.min(100, Math.round(numeric)));
+  });
+
+  let total = values.reduce((sum, value) => sum + value, 0);
+  let diff = total - 100;
+
+  if (diff > 0) {
+    let remaining = diff;
+    for (let i = values.length - 1; i >= 0 && remaining > 0; i -= 1) {
+      const delta = Math.min(values[i], remaining);
+      values[i] -= delta;
+      remaining -= delta;
+    }
+  } else if (diff < 0) {
+    let remaining = -diff;
+    for (let i = values.length - 1; i >= 0 && remaining > 0; i -= 1) {
+      const capacity = 100 - values[i];
+      if (capacity <= 0) {
+        continue;
+      }
+      const delta = Math.min(capacity, remaining);
+      values[i] += delta;
+      remaining -= delta;
+    }
+  }
+
+  return rows.map((row, index) => ({
+    ...row,
+    sharePercent: String(values[index])
+  }));
 };
 
 const CreateTransactionScreen: React.FC<Props> = ({route, navigation}) => {
@@ -45,13 +99,16 @@ const CreateTransactionScreen: React.FC<Props> = ({route, navigation}) => {
   const [note, setNote] = useState(transaction?.note ?? '');
   const [splits, setSplits] = useState<SplitFormRow[]>(() => {
     if (transaction && transaction.splits.length > 0) {
-      return transaction.splits.map(split => ({userName: split.userName, sharePercent: String(split.sharePercent)}));
+      return transaction.splits.map(split => ({
+        userName: split.userName,
+        sharePercent: normalizePercentValue(split.sharePercent)
+      }));
     }
     if (members.length > 0) {
       const equalPercents = buildEqualPercentages(members.length);
       return members.map((member, index) => ({
         userName: member.user_name,
-        sharePercent: equalPercents[index] ?? '0'
+        sharePercent: normalizePercentValue(equalPercents[index])
       }));
     }
     return [];
@@ -73,50 +130,97 @@ const CreateTransactionScreen: React.FC<Props> = ({route, navigation}) => {
     }
   }, [memberNames, payerName]);
 
-  const updateSplit = (index: number, key: keyof SplitFormRow, value: string) => {
-    setSplits(current => {
-      const next = [...current];
-      next[index] = {
-        ...next[index],
-        [key]: value
-      };
-      return next;
-    });
-  };
-
   useEffect(() => {
-    if (transaction) {
-      return;
-    }
-    if (members.length === 0) {
+    if (memberNames.length === 0) {
       setSplits([]);
       return;
     }
     setSplits(current => {
-      const equalPercents = buildEqualPercentages(members.length);
-      if (current.length === 0) {
-        return members.map((member, index) => ({
-          userName: member.user_name,
-          sharePercent: equalPercents[index] ?? '0'
-        }));
+      if (current.length === memberNames.length && memberNames.every((name, idx) => current[idx]?.userName === name)) {
+        return current;
       }
-      const existing = new Map(current.map(split => [split.userName, split]));
-      const updated = members.map((member, index) => {
-        const row = existing.get(member.user_name);
-        if (row) {
-          return row;
-        }
-        return {
-          userName: member.user_name,
-          sharePercent: equalPercents[index] ?? '0'
-        };
-      });
-      const unchanged =
-        updated.length === current.length &&
-        updated.every((row, idx) => row === current[idx]);
-      return unchanged ? current : updated;
+      const existing = new Map(current.map(split => [split.userName, split.sharePercent]));
+      const equalPercents = buildEqualPercentages(memberNames.length);
+      const mapped = memberNames.map((memberName, index) => ({
+        userName: memberName,
+        sharePercent: normalizePercentValue(existing.get(memberName) ?? equalPercents[index] ?? '0')
+      }));
+      return rebalanceSplitsToHundred(mapped);
     });
-  }, [members, transaction]);
+  }, [memberNames]);
+
+  const handleSplitPercentChange = useCallback(
+    (memberName: string, rawValue: string) => {
+      if (memberNames.length === 0) {
+        return;
+      }
+      const sanitized = sanitizePercentInput(rawValue);
+      const targetValue = Math.min(Number(sanitized), 100);
+
+      setSplits(prev => {
+        const valueMap = new Map<string, number>();
+        memberNames.forEach(name => {
+          const existing = prev.find(row => row.userName === name);
+          const parsed = existing ? Number(existing.sharePercent) : undefined;
+          const normalized = Number.isFinite(parsed) ? Math.round(Number(parsed)) : 0;
+          valueMap.set(name, Math.max(0, Math.min(100, normalized)));
+        });
+
+        valueMap.set(memberName, targetValue);
+
+        let sum = 0;
+        valueMap.forEach(value => {
+          sum += value;
+        });
+
+        let diff = sum - 100;
+        const adjustable = memberNames.filter(name => name !== memberName);
+
+        if (diff > 0) {
+          let remaining = diff;
+          for (let i = adjustable.length - 1; i >= 0 && remaining > 0; i -= 1) {
+            const name = adjustable[i];
+            const currentValue = valueMap.get(name) ?? 0;
+            if (currentValue <= 0) {
+              continue;
+            }
+            const delta = Math.min(currentValue, remaining);
+            valueMap.set(name, currentValue - delta);
+            remaining -= delta;
+          }
+          if (remaining > 0) {
+            const currentValue = valueMap.get(memberName) ?? 0;
+            valueMap.set(memberName, Math.max(0, currentValue - remaining));
+          }
+        } else if (diff < 0) {
+          let remaining = -diff;
+          for (let i = adjustable.length - 1; i >= 0 && remaining > 0; i -= 1) {
+            const name = adjustable[i];
+            const currentValue = valueMap.get(name) ?? 0;
+            const capacity = 100 - currentValue;
+            if (capacity <= 0) {
+              continue;
+            }
+            const delta = Math.min(capacity, remaining);
+            valueMap.set(name, currentValue + delta);
+            remaining -= delta;
+          }
+          if (remaining > 0) {
+            const currentValue = valueMap.get(memberName) ?? 0;
+            const capacity = 100 - currentValue;
+            const delta = Math.min(capacity, remaining);
+            valueMap.set(memberName, currentValue + delta);
+          }
+        }
+
+        return memberNames.map(name => ({
+          userName: name,
+          sharePercent: String(Math.max(0, Math.min(100, Math.round(valueMap.get(name) ?? 0))))
+        }));
+      });
+    },
+    [memberNames]
+  );
 
   const handleSubmit = async () => {
     const amountNumber = Number(amount);
@@ -260,11 +364,10 @@ const CreateTransactionScreen: React.FC<Props> = ({route, navigation}) => {
         <View style={styles.splitHeader}>
           <Text style={styles.label}>Splits</Text>
         </View>
-        <Text style={styles.helper}>Assign split percentages to each member. Totals must equal 100%.</Text>
         {memberNames.map(name => {
-          const splitIndex = splits.findIndex(s => s.userName === name);
-          const percentValue = splitIndex >= 0 ? splits[splitIndex].sharePercent : '';
-          const percentNumber = Math.min(Number(percentValue) || 0, 100);
+          const split = splits.find(s => s.userName === name);
+          const percentValue = split ? split.sharePercent : '0';
+          const percentNumber = Math.max(0, Math.min(Number(percentValue) || 0, 100));
           return (
             <View key={name} style={styles.splitRowGraphical}>
               <View style={styles.splitRowTop}>
@@ -278,19 +381,13 @@ const CreateTransactionScreen: React.FC<Props> = ({route, navigation}) => {
                 </View>
                 <View style={styles.splitInputContainer}>
                   <Text style={styles.percentPrefix}>%</Text>
-                  <TextField
+                  <TextInput
                     value={percentValue}
-                    onChangeText={value => {
-                      const sanitized = sanitizePercentInput(value);
-                      if (splitIndex >= 0) {
-                        updateSplit(splitIndex, 'sharePercent', sanitized);
-                      } else {
-                        setSplits(current => [...current, {userName: name, sharePercent: sanitized}]);
-                      }
-                    }}
+                    onChangeText={value => handleSplitPercentChange(name, value)}
                     keyboardType="number-pad"
                     placeholder="0"
                     style={styles.percentField}
+                    maxLength={3}
                     selectTextOnFocus
                   />
                 </View>
@@ -355,15 +452,15 @@ const styles = StyleSheet.create({
     alignItems: 'stretch',
     backgroundColor: 'rgba(243, 244, 246, 0.9)',
     borderRadius: 16,
-    padding: 16,
+    padding: 14,
     marginTop: 14,
     marginBottom: 4,
-    gap: 10,
+    gap: 12,
     shadowColor: '#6366f1',
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.06,
     shadowOffset: {width: 0, height: 4},
-    shadowRadius: 10,
-    elevation: 3
+    shadowRadius: 9,
+    elevation: 2
   },
   splitRowTop: {
     flexDirection: 'row',
@@ -396,23 +493,24 @@ const styles = StyleSheet.create({
   splitInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 14,
-    borderWidth: 0,
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(99, 102, 241, 0.25)',
     backgroundColor: '#ffffff',
-    minWidth: 120,
+    minWidth: 96,
     shadowColor: '#6366f1',
-    shadowOpacity: 0.1,
-    shadowOffset: {width: 0, height: 3},
-    shadowRadius: 8,
-    elevation: 2
+    shadowOpacity: 0.05,
+    shadowOffset: {width: 0, height: 2},
+    shadowRadius: 6,
+    elevation: 1
   },
   percentPrefix: {
     fontWeight: '700',
-    color: '#6366f1',
-    fontSize: 16
+    color: '#4f46e5',
+    fontSize: 15
   },
   chip: {
     flexDirection: 'row',
@@ -448,15 +546,14 @@ const styles = StyleSheet.create({
     fontWeight: '700'
   },
   percentField: {
-    width: 64,
-    minHeight: 46,
+    width: 52,
+    minHeight: 38,
     textAlign: 'center',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '600',
-    color: '#1f2937',
-    borderWidth: 0,
-    backgroundColor: 'transparent',
-    paddingVertical: 0
+    color: '#111827',
+    paddingVertical: 0,
+    paddingHorizontal: 0
   },
   splitLabel: {
     color: '#1f2937',
@@ -475,7 +572,7 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: '#2563eb',
     borderRadius: 4
-  }
+  },
 });
 
 export default CreateTransactionScreen;

@@ -671,36 +671,34 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
 
             return (
               <View key={tx.id} style={styles.transactionCard}>
-                <View style={styles.txHeaderRow}>
-                  <Text style={styles.txTitle}>{tx.title}</Text>
-                  <View style={styles.txHeaderActions}>
-                    {dateStr ? <Text style={styles.txDate}>{dateStr}</Text> : null}
+                <Text style={styles.txTitle}>{tx.title}</Text>
+                {dateStr ? <Text style={styles.txDate}>{dateStr}</Text> : null}
+                <View style={styles.txActionsRow}>
+                  <TouchableOpacity
+                    style={styles.txActionButton}
+                    onPress={() => handleTransactionPress(tx)}
+                    hitSlop={touchHitSlop}
+                    pressRetentionOffset={touchHitSlop}
+                  >
+                    <Text style={styles.txActionLabel}>Edit</Text>
+                  </TouchableOpacity>
+                  {canDelete ? (
                     <TouchableOpacity
-                      style={styles.txActionButton}
-                      onPress={() => handleTransactionPress(tx)}
+                      style={[
+                        styles.txActionButton,
+                        styles.txDeleteButton,
+                        deletingTransactionId === tx.id ? styles.txActionDisabled : null
+                      ]}
+                      onPress={() => handleDeleteTransaction(tx)}
+                      disabled={deletingTransactionId === tx.id}
                       hitSlop={touchHitSlop}
                       pressRetentionOffset={touchHitSlop}
                     >
-                      <Text style={styles.txActionLabel}>Edit</Text>
+                      <Text style={styles.txDeleteLabel}>
+                        {deletingTransactionId === tx.id ? 'Deleting...' : 'Delete'}
+                      </Text>
                     </TouchableOpacity>
-                    {canDelete ? (
-                      <TouchableOpacity
-                        style={[
-                          styles.txActionButton,
-                          styles.txDeleteButton,
-                          deletingTransactionId === tx.id ? styles.txActionDisabled : null
-                        ]}
-                        onPress={() => handleDeleteTransaction(tx)}
-                        disabled={deletingTransactionId === tx.id}
-                        hitSlop={touchHitSlop}
-                        pressRetentionOffset={touchHitSlop}
-                      >
-                        <Text style={styles.txDeleteLabel}>
-                          {deletingTransactionId === tx.id ? 'Deleting...' : 'Delete'}
-                        </Text>
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
+                  ) : null}
                 </View>
                 <Text style={styles.txAmount}>{formatCurrency(tx.amount)}</Text>
                 {tx.note ? <Text style={styles.txNote}>{tx.note}</Text> : null}
@@ -942,29 +940,17 @@ const styles = StyleSheet.create({
     elevation: 4,
     gap: 8
   },
-  txHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    flexWrap: 'wrap',
-    gap: 12,
-    marginBottom: 4,
-    width: '100%'
+  txDate: {
+    color: '#64748b',
+    fontSize: 14,
+    fontWeight: '600'
   },
-  txHeaderActions: {
+  txActionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: 8,
-    marginLeft: 'auto',
-    paddingTop: 2,
-    maxWidth: '100%',
-    justifyContent: 'flex-end'
-  },
-  txDate: {
-    color: '#64748b',
-    fontSize: 14,
-    fontWeight: '600',
-    marginLeft: 8
+    marginTop: 4
   },
   txTitle: {
     fontWeight: '800',

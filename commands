@@ -1,3 +1,9 @@
+# for Emulator
+set PATH=C:\Users\purne\AppData\Local\Android\Sdk\platform-tools;%PATH%
+set ANDROID_SDK_ROOT=C:\Users\purne\AppData\Local\Android\Sdk
+set ANDROID_HOME=C:\Users\purne\AppData\Local\Android\Sdk
+
+
 #in emulator
 set EXPO_PUBLIC_API_BASE_URL=http://10.0.2.2:7071/api
 npm run android
