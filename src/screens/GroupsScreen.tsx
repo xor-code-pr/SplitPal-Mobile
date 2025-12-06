@@ -98,10 +98,6 @@ const GroupsScreen: React.FC<Props> = ({navigation}) => {
     }
   }, [loadGroups]);
 
-  useEffect(() => {
-    fetchGroups();
-  }, [fetchGroups]);
-
   useFocusEffect(
     useCallback(() => {
       fetchGroups();
@@ -433,9 +429,6 @@ const styles = StyleSheet.create({
   modalActionLabel: {
     color: '#f8fafc',
     fontWeight: '700'
-  },
-  modalActionCancelLabel: {
-    color: '#0f172a'
   },
   modalActionCancelLabel: {
     color: '#0f172a'
