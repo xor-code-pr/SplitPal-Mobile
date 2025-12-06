@@ -12,6 +12,11 @@ type Props = NativeStackScreenProps<RootStackParamList, 'GroupDetail'>;
 
 type TransactionsResponse = {
   transactions?: Transaction[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
+  next_offset?: number;
 };
 
 type BalanceResponseRow = {
@@ -66,11 +71,21 @@ type UserImpactSummary = {
   tone: UserImpactTone;
 };
 
+type TransactionsMeta = {
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+  nextOffset: number;
+};
+
 const normalizeName = (value: string | null | undefined): string => value?.trim().toLowerCase() ?? '';
 
 const formatCurrency = (amount: number): string => `₹${amount.toFixed(2)}`;
 
 const LEAVE_BALANCE_TOLERANCE = 0.01;
+const INITIAL_TRANSACTIONS_LIMIT = 3;
+const SUBSEQUENT_TRANSACTIONS_LIMIT = 10;
 
 const buildUserImpactSummary = (transaction: TransactionRow, currentUserName: string | null | undefined): UserImpactSummary | null => {
   const normalizedUser = normalizeName(currentUserName);
@@ -133,6 +148,55 @@ const parseAmount = (value: string | number | null | undefined): number => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const parsePercent = (value: string | number | null | undefined): number | null => {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return numeric;
+};
+
+const normalizeTransaction = (tx: Transaction): TransactionRow => {
+  const amount = parseAmount(tx.amount);
+  const splits = (tx.splits ?? []).map(split => {
+    const shareAmount = parseAmount(split.share_amount);
+    const percentFromApi = parsePercent(split.share_percent);
+    const computedPercent = amount > 0 ? (shareAmount / amount) * 100 : 0;
+    const resolvedPercent = percentFromApi ?? computedPercent;
+    const sharePercent = Number.isFinite(resolvedPercent) ? Number(resolvedPercent.toFixed(2)) : 0;
+    return {
+      userName: split.user_name ?? 'Unknown',
+      shareAmount,
+      sharePercent
+    };
+  });
+
+  const createdByValue = tx.created_by_user_id;
+  const normalizedCreatedBy = typeof createdByValue === 'number'
+    ? createdByValue
+    : createdByValue !== null && createdByValue !== undefined
+    ? Number(createdByValue)
+    : null;
+
+  return {
+    id: tx.transaction_id,
+    title: tx.title,
+    amount,
+    note: tx.note ?? null,
+    payerName: tx.payer_user_name ?? null,
+    createdAt: tx.created_at ?? null,
+    createdById: Number.isFinite(normalizedCreatedBy) ? normalizedCreatedBy : null,
+    createdByName: tx.created_by_user_name ?? null,
+    splits
+  };
+};
+
+const normalizeTransactionsList = (transactionsData: Transaction[]): TransactionRow[] =>
+  transactionsData.map(normalizeTransaction);
+
 const buildBalanceId = (row: BalanceResponseRow, index: number): string => {
   if (typeof row.user_id === 'number') {
     return `user-${row.user_id}`;
@@ -148,6 +212,14 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
   const {groupId, name, members = [], createdById = null} = route.params;
   const {userName: currentUserName, userId: currentUserId, isAdmin} = useAuth();
   const [transactions, setTransactions] = useState<TransactionRow[]>([]);
+  const [transactionsMeta, setTransactionsMeta] = useState<TransactionsMeta>({
+    total: 0,
+    offset: 0,
+    limit: INITIAL_TRANSACTIONS_LIMIT,
+    hasMore: false,
+    nextOffset: 0
+  });
+  const [loadingMoreTransactions, setLoadingMoreTransactions] = useState(false);
   const [balances, setBalances] = useState<BalanceRow[]>([]);
   const [groupMembers, setGroupMembers] = useState<GroupMember[]>(members);
   const [loading, setLoading] = useState(true);
@@ -179,52 +251,114 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
     });
   }, [currentUserId, groupMembers]);
   const canManageMembers = isAdmin || isGroupAdmin;
+  const handleShowMoreTransactions = useCallback(async () => {
+    if (loadingMoreTransactions || !transactionsMeta.hasMore) {
+      return;
+    }
+
+    const nextOffset = transactionsMeta.nextOffset;
+    setLoadingMoreTransactions(true);
+    try {
+      const response = await api.get<TransactionsResponse>(`/groups/${groupId}/transactions`, {
+        params: {limit: SUBSEQUENT_TRANSACTIONS_LIMIT, offset: nextOffset}
+      });
+      const payload = response.data ?? {};
+      const normalized = normalizeTransactionsList(payload.transactions ?? []);
+
+      setTransactions(prev => {
+        if (normalized.length === 0) {
+          return prev;
+        }
+        const seen = new Set(prev.map(item => item.id));
+        const additions: TransactionRow[] = [];
+        for (const item of normalized) {
+          if (!seen.has(item.id)) {
+            seen.add(item.id);
+            additions.push(item);
+          }
+        }
+        return additions.length ? [...prev, ...additions] : prev;
+      });
+
+      setTransactionsMeta(prev => {
+        const baseOffset = typeof payload.offset === 'number' ? payload.offset : nextOffset;
+        const limitValue = typeof payload.limit === 'number' ? payload.limit : SUBSEQUENT_TRANSACTIONS_LIMIT;
+        const responseLength = Array.isArray(payload.transactions) ? payload.transactions.length : normalized.length;
+        const computedNextOffset = typeof payload.next_offset === 'number'
+          ? payload.next_offset
+          : baseOffset + responseLength;
+        const totalValue = typeof payload.total === 'number'
+          ? payload.total
+          : Math.max(prev.total, computedNextOffset);
+        const hasMoreValue = typeof payload.has_more === 'boolean'
+          ? payload.has_more
+          : computedNextOffset < totalValue;
+        return {
+          total: totalValue,
+          offset: baseOffset,
+          limit: limitValue,
+          hasMore: hasMoreValue,
+          nextOffset: computedNextOffset
+        };
+      });
+    } catch (error) {
+      Alert.alert('Unable to load more transactions', 'Please try again.');
+    } finally {
+      setLoadingMoreTransactions(false);
+    }
+  }, [groupId, loadingMoreTransactions, transactionsMeta]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const transactionsPromise = api
-        .get<TransactionsResponse>(`/groups/${groupId}/transactions`)
-        .then(res => res.data?.transactions ?? [])
-        .catch(() => [] as Transaction[]);
+        .get<TransactionsResponse>(`/groups/${groupId}/transactions`, {
+          params: {limit: INITIAL_TRANSACTIONS_LIMIT, offset: 0}
+        })
+        .then(res => res.data ?? {})
+        .catch(() => ({
+          transactions: [],
+          total: 0,
+          limit: INITIAL_TRANSACTIONS_LIMIT,
+          offset: 0,
+          has_more: false,
+          next_offset: 0
+        }));
       const balancesPromise = api
         .get<BalancesResponse>(`/groups/${groupId}/balances`)
         .then(res => res.data?.balances ?? [])
         .catch(() => [] as BalanceResponseRow[]);
 
-      const [transactionsData, balancesData] = await Promise.all([transactionsPromise, balancesPromise]);
+      const [transactionsPayload, balancesData] = await Promise.all([transactionsPromise, balancesPromise]);
 
-      setTransactions(
-        transactionsData.map(tx => {
-          const amount = parseAmount(tx.amount);
-          const splits = (tx.splits ?? []).map(split => {
-            const shareAmount = parseAmount(split.share_amount);
-            const rawPercent = amount > 0 ? (shareAmount / amount) * 100 : 0;
-            return {
-              userName: split.user_name ?? 'Unknown',
-              shareAmount,
-              sharePercent: Number(rawPercent.toFixed(2))
-            };
-          });
+      const normalizedTransactions = normalizeTransactionsList(transactionsPayload.transactions ?? []);
+      setTransactions(normalizedTransactions);
 
-          return {
-            id: tx.transaction_id,
-            title: tx.title,
-            amount,
-            note: tx.note ?? null,
-            payerName: tx.payer_user_name ?? null,
-            createdAt: tx.created_at ?? null,
-            createdById:
-              typeof tx.created_by_user_id === 'number'
-                ? tx.created_by_user_id
-                : tx.created_by_user_id !== null && tx.created_by_user_id !== undefined
-                ? Number(tx.created_by_user_id)
-                : null,
-            createdByName: tx.created_by_user_name ?? null,
-            splits
-          };
-        })
-      );
+      const initialOffset = typeof transactionsPayload.offset === 'number' ? transactionsPayload.offset : 0;
+      const responseLength = Array.isArray(transactionsPayload.transactions)
+        ? transactionsPayload.transactions.length
+        : normalizedTransactions.length;
+      const initialLimit = typeof transactionsPayload.limit === 'number'
+        ? transactionsPayload.limit
+        : INITIAL_TRANSACTIONS_LIMIT;
+      const nextOffset = typeof transactionsPayload.next_offset === 'number'
+        ? transactionsPayload.next_offset
+        : initialOffset + responseLength;
+      const fallbackTotal = initialOffset + responseLength;
+      const totalValue = typeof transactionsPayload.total === 'number'
+        ? transactionsPayload.total
+        : fallbackTotal;
+      const hasMore = typeof transactionsPayload.has_more === 'boolean'
+        ? transactionsPayload.has_more
+        : nextOffset < totalValue;
+
+      setTransactionsMeta({
+        total: totalValue,
+        offset: initialOffset,
+        limit: initialLimit,
+        hasMore,
+        nextOffset
+      });
 
       const mappedBalances = balancesData.map((row, index) => ({
         id: buildBalanceId(row, index),
@@ -740,7 +874,7 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
 
         {isCreator ? (
           <View style={styles.inviteContainer}>
-            <Text style={styles.helperText}>You are the group creator. Invite registered users by email.</Text>
+            <Text style={styles.helperText}>You are the group creator. Invite registered users by name or email.</Text>
             <TextInput
               value={inviteQuery}
               onChangeText={text => {
@@ -748,10 +882,9 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
                 setInviteError(null);
                 setInviteStatus(null);
               }}
-              placeholder="Search by email"
+              placeholder="Search by name or email"
               autoCapitalize="none"
               autoCorrect={false}
-              keyboardType="email-address"
               style={styles.input}
             />
             {lookupLoading ? (
@@ -813,72 +946,87 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
         {transactions.length === 0 ? (
           <Text style={styles.muted}>No transactions yet. Add one to get started.</Text>
         ) : (
-          transactions.map(tx => {
-            let dateStr = '';
-            if (tx.createdAt) {
-              const d = new Date(tx.createdAt);
-              dateStr =
-                d.toLocaleDateString(undefined, {year: 'numeric', month: 'short', day: 'numeric'}) +
-                ' ' + d.toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit'});
-            }
-            const impact = buildUserImpactSummary(tx, currentUserName);
-            const canDelete = Boolean(isAdmin || (tx.createdById !== null && currentUserId === tx.createdById));
+          <>
+            {transactions.map(tx => {
+              let dateStr = '';
+              if (tx.createdAt) {
+                const d = new Date(tx.createdAt);
+                dateStr =
+                  d.toLocaleDateString(undefined, {year: 'numeric', month: 'short', day: 'numeric'}) +
+                  ' ' + d.toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit'});
+              }
+              const impact = buildUserImpactSummary(tx, currentUserName);
+              const canDelete = Boolean(isAdmin || (tx.createdById !== null && currentUserId === tx.createdById));
 
-            return (
-              <View key={tx.id} style={styles.transactionCard}>
-                <Text style={styles.txTitle}>{tx.title}</Text>
-                {dateStr ? <Text style={styles.txDate}>{dateStr}</Text> : null}
-                <View style={styles.txActionsRow}>
-                  <TouchableOpacity
-                    style={styles.txActionButton}
-                    onPress={() => handleTransactionPress(tx)}
-                    hitSlop={touchHitSlop}
-                    pressRetentionOffset={touchHitSlop}
-                  >
-                    <Text style={styles.txActionLabel}>Edit</Text>
-                  </TouchableOpacity>
-                  {canDelete ? (
+              return (
+                <View key={tx.id} style={styles.transactionCard}>
+                  <Text style={styles.txTitle}>{tx.title}</Text>
+                  {dateStr ? <Text style={styles.txDate}>{dateStr}</Text> : null}
+                  <View style={styles.txActionsRow}>
                     <TouchableOpacity
-                      style={[
-                        styles.txActionButton,
-                        styles.txDeleteButton,
-                        deletingTransactionId === tx.id ? styles.txActionDisabled : null
-                      ]}
-                      onPress={() => handleDeleteTransaction(tx)}
-                      disabled={deletingTransactionId === tx.id}
+                      style={styles.txActionButton}
+                      onPress={() => handleTransactionPress(tx)}
                       hitSlop={touchHitSlop}
                       pressRetentionOffset={touchHitSlop}
                     >
-                      <Text style={styles.txDeleteLabel}>
-                        {deletingTransactionId === tx.id ? 'Deleting...' : 'Delete'}
-                      </Text>
+                      <Text style={styles.txActionLabel}>Edit</Text>
                     </TouchableOpacity>
+                    {canDelete ? (
+                      <TouchableOpacity
+                        style={[
+                          styles.txActionButton,
+                          styles.txDeleteButton,
+                          deletingTransactionId === tx.id ? styles.txActionDisabled : null
+                        ]}
+                        onPress={() => handleDeleteTransaction(tx)}
+                        disabled={deletingTransactionId === tx.id}
+                        hitSlop={touchHitSlop}
+                        pressRetentionOffset={touchHitSlop}
+                      >
+                        <Text style={styles.txDeleteLabel}>
+                          {deletingTransactionId === tx.id ? 'Deleting...' : 'Delete'}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                  <Text style={styles.txAmount}>{formatCurrency(tx.amount)}</Text>
+                  {tx.note ? <Text style={styles.txNote}>{tx.note}</Text> : null}
+                  <Text style={styles.txMeta}>
+                    {tx.payerName ? `Paid by ${tx.payerName}` : 'Paid by unknown user'}
+                  </Text>
+                  {impact ? (
+                    <Text
+                      style={[
+                        styles.txUserImpact,
+                        impact.tone === 'owed'
+                          ? styles.txOwed
+                          : impact.tone === 'owes'
+                          ? styles.txOwing
+                          : impact.tone === 'settled'
+                          ? styles.txSettled
+                          : styles.txInfo
+                      ]}
+                    >
+                      {impact.message}
+                    </Text>
                   ) : null}
                 </View>
-                <Text style={styles.txAmount}>{formatCurrency(tx.amount)}</Text>
-                {tx.note ? <Text style={styles.txNote}>{tx.note}</Text> : null}
-                <Text style={styles.txMeta}>
-                  {tx.payerName ? `Paid by ${tx.payerName}` : 'Paid by unknown user'}
+              );
+            })}
+            {transactionsMeta.hasMore ? (
+              <TouchableOpacity
+                style={[styles.showMoreButton, loadingMoreTransactions ? styles.txActionDisabled : null]}
+                onPress={handleShowMoreTransactions}
+                disabled={loadingMoreTransactions}
+                hitSlop={touchHitSlop}
+                pressRetentionOffset={touchHitSlop}
+              >
+                <Text style={styles.showMoreLabel}>
+                  {loadingMoreTransactions ? 'Loading...' : 'Show more'}
                 </Text>
-                {impact ? (
-                  <Text
-                    style={[
-                      styles.txUserImpact,
-                      impact.tone === 'owed'
-                        ? styles.txOwed
-                        : impact.tone === 'owes'
-                        ? styles.txOwing
-                        : impact.tone === 'settled'
-                        ? styles.txSettled
-                        : styles.txInfo
-                    ]}
-                  >
-                    {impact.message}
-                  </Text>
-                ) : null}
-              </View>
-            );
-          })
+              </TouchableOpacity>
+            ) : null}
+          </>
         )}
       </View>
     </ScrollView>
@@ -1185,6 +1333,24 @@ const styles = StyleSheet.create({
   },
   txInfo: {
     color: '#6b7280'
+  },
+  showMoreButton: {
+    marginTop: 12,
+    alignSelf: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 16,
+    backgroundColor: '#2563eb',
+    shadowColor: '#1e293b',
+    shadowOpacity: 0.15,
+    shadowOffset: {width: 0, height: 2},
+    shadowRadius: 4,
+    elevation: 3
+  },
+  showMoreLabel: {
+    color: '#f8fafc',
+    fontWeight: '700',
+    fontSize: 15
   },
   headerAction: {
     color: '#2563eb',

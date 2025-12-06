@@ -32,6 +32,7 @@ export type TransactionSplitDetail = {
   split_id: number;
   user_name?: string | null;
   share_amount: string;
+  share_percent?: string | null;
 };
 
 export type AdminUserSummary = {
