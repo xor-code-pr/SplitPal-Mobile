@@ -10,6 +10,8 @@ npm run android
 
 
 set EXPO_PUBLIC_API_BASE_URL=http://192.168.29.15:7071/api
+set EXPO_PUBLIC_API_BASE_URL=https://stamp-moses-hall-tamil.trycloudflare.com/api
+# for apk update in eas.json
 
 #web UI
 npx expo start --web
