@@ -28,6 +28,11 @@ type GroupsResponse = {
     members?: Array<{
       user_id: number;
       user_name: string;
+      role?: string | null;
+      member_role?: string | null;
+      group_role?: string | null;
+      is_admin?: boolean | null;
+      admin?: boolean | null;
     }>;
   }>;
 };
@@ -50,10 +55,24 @@ const GroupsScreen: React.FC<Props> = ({navigation}) => {
         name: group.group_name,
         createdById: group.created_by_id ?? null,
         createdByName: group.created_by_name ?? null,
-        members: (group.members ?? []).map(member => ({
-          user_id: member.user_id,
-          user_name: member.user_name
-        }))
+        members: (group.members ?? []).map(member => {
+          const rawRole = (member.role ?? member.member_role ?? member.group_role) ?? null;
+          const normalizedRole = typeof rawRole === 'string' ? rawRole.trim().toLowerCase() : '';
+          const explicitAdminFlag =
+            typeof member.is_admin === 'boolean'
+              ? member.is_admin
+              : typeof member.admin === 'boolean'
+              ? member.admin
+              : normalizedRole === 'admin' || normalizedRole === 'owner'
+              ? true
+              : null;
+          return {
+            user_id: member.user_id,
+            user_name: member.user_name,
+            role: rawRole,
+            is_admin: explicitAdminFlag
+          };
+        })
       }));
       setGroups(normalized);
     } catch {

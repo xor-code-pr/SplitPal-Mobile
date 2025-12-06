@@ -1,8 +1,8 @@
-import React, {useCallback, useEffect, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {ActivityIndicator, Alert, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View} from 'react-native';
 import axios from 'axios';
 import {NativeStackScreenProps} from '@react-navigation/native-stack';
-import {useFocusEffect} from '@react-navigation/native';
+import {CommonActions, useFocusEffect} from '@react-navigation/native';
 import {RootStackParamList} from '@navigation/RootNavigator';
 import {GroupMember, Transaction} from '@src/types';
 import {api} from '@api/client';
@@ -69,6 +69,8 @@ type UserImpactSummary = {
 const normalizeName = (value: string | null | undefined): string => value?.trim().toLowerCase() ?? '';
 
 const formatCurrency = (amount: number): string => `₹${amount.toFixed(2)}`;
+
+const LEAVE_BALANCE_TOLERANCE = 0.01;
 
 const buildUserImpactSummary = (transaction: TransactionRow, currentUserName: string | null | undefined): UserImpactSummary | null => {
   const normalizedUser = normalizeName(currentUserName);
@@ -158,8 +160,25 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
   const [inviteSubmittingId, setInviteSubmittingId] = useState<number | null>(null);
   const [removeLoadingId, setRemoveLoadingId] = useState<number | null>(null);
   const [deletingTransactionId, setDeletingTransactionId] = useState<number | null>(null);
+  const [leaveLoading, setLeaveLoading] = useState(false);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isCreator = createdById !== null && currentUserId !== null && createdById === currentUserId;
+  const isGroupAdmin = useMemo(() => {
+    if (currentUserId === null) {
+      return false;
+    }
+    return groupMembers.some(member => {
+      if (member.user_id !== currentUserId) {
+        return false;
+      }
+      if (member.is_admin) {
+        return true;
+      }
+      const normalizedRole = typeof member.role === 'string' ? member.role.trim().toLowerCase() : '';
+      return normalizedRole === 'admin' || normalizedRole === 'owner';
+    });
+  }, [currentUserId, groupMembers]);
+  const canManageMembers = isAdmin || isGroupAdmin;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -239,13 +258,138 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
     }, [fetchData])
   );
 
+  const resolveBalanceForMember = useCallback(
+    (memberId: number, memberName?: string | null) => {
+      if (Object.prototype.hasOwnProperty.call(balanceMap, memberId)) {
+        const value = balanceMap[memberId];
+        return value ?? 0;
+      }
+
+      const normalizedName = normalizeName(memberName);
+      const match = balances.find(row => {
+        if (typeof row.userId === 'number' && row.userId === memberId) {
+          return true;
+        }
+        if (!normalizedName) {
+          return false;
+        }
+        return normalizeName(row.name) === normalizedName;
+      });
+
+      return match ? match.balance : 0;
+    },
+    [balanceMap, balances]
+  );
+
+  const executeLeaveGroup = useCallback(async () => {
+    if (currentUserId === null) {
+      Alert.alert('Leave group failed', 'Unable to identify the current user.');
+      return;
+    }
+
+    setLeaveLoading(true);
+    try {
+      await api.delete(`/groups/${groupId}/members/${currentUserId}`);
+      setGroupMembers(prev => prev.filter(member => member.user_id !== currentUserId));
+      setBalances(prev => prev.filter(row => row.userId !== currentUserId));
+      setBalanceMap(prev => {
+        const next = {...prev};
+        delete next[currentUserId];
+        return next;
+      });
+      Alert.alert(
+        'Left group',
+        'You can rejoin later with a new invite.',
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              navigation.dispatch(
+                CommonActions.reset({
+                  index: 0,
+                  routes: [{name: 'Groups'}]
+                })
+              );
+            }
+          }
+        ],
+        {cancelable: false}
+      );
+    } catch (error) {
+      let message = 'Unable to leave this group right now.';
+      if (axios.isAxiosError(error)) {
+        const data = error.response?.data;
+        if (typeof data === 'string') {
+          message = data;
+        } else if (data && typeof data === 'object' && 'message' in data) {
+          message = String(data.message);
+        }
+      }
+      Alert.alert('Leave group failed', message);
+    } finally {
+      setLeaveLoading(false);
+    }
+  }, [currentUserId, groupId, navigation]);
+
+  const handleLeaveGroup = useCallback(() => {
+    if (leaveLoading) {
+      return;
+    }
+    if (currentUserId === null) {
+      Alert.alert('Leave group failed', 'Unable to identify the current user.');
+      return;
+    }
+
+    const currentMember = groupMembers.find(member => member.user_id === currentUserId);
+    const effectiveName = currentMember?.user_name ?? currentUserName;
+    const balanceValue = resolveBalanceForMember(currentUserId, effectiveName);
+
+    if (Math.abs(balanceValue) > LEAVE_BALANCE_TOLERANCE) {
+      Alert.alert('Cannot leave group', 'Settle your balance before leaving the group.');
+      return;
+    }
+
+    if (Platform.OS === 'web') {
+      const scope =
+        typeof globalThis !== 'undefined'
+          ? (globalThis as unknown as {confirm?: (message?: string) => boolean})
+          : null;
+      const confirmFn = typeof scope?.confirm === 'function' ? scope.confirm : null;
+      const confirmed = confirmFn ? confirmFn('Leave this group? You will need a new invite to rejoin.') : true;
+      if (confirmed) {
+        executeLeaveGroup();
+      }
+      return;
+    }
+
+    Alert.alert('Leave group?', 'You will need a new invite to rejoin.', [
+      {text: 'Cancel', style: 'cancel'},
+      {text: 'Leave', style: 'destructive', onPress: executeLeaveGroup}
+    ]);
+  }, [leaveLoading, currentUserId, currentUserName, groupMembers, resolveBalanceForMember, executeLeaveGroup]);
+
   const handleRemoveMember = useCallback(
     async (member: GroupMember) => {
-      const balanceValue = balanceMap[member.user_id] ?? 0;
-      if (Math.abs(balanceValue) > 0.009) {
+      if (!canManageMembers) {
+        Alert.alert('Action restricted', 'Only group admins can remove members.');
+        return;
+      }
+
+      if (currentUserId !== null && member.user_id === currentUserId) {
+        handleLeaveGroup();
+        return;
+      }
+
+      if (typeof createdById === 'number' && member.user_id === createdById) {
+        Alert.alert('Action restricted', 'The group creator can only remove themselves.');
+        return;
+      }
+
+      const balanceValue = resolveBalanceForMember(member.user_id, member.user_name);
+      if (balanceValue !== 0) { // mirrors API rule: only zero-balance members can be removed by admins
         Alert.alert(
           'Cannot remove member',
-          'This member still has an unsettled balance in the group.'
+          'This member must have a zero balance before they can be removed.'
         );
         return;
       }
@@ -278,7 +422,7 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
         setRemoveLoadingId(null);
       }
     },
-    [balanceMap, groupId]
+    [canManageMembers, currentUserId, handleLeaveGroup, resolveBalanceForMember, groupId, createdById]
   );
 
   const handleInviteUser = useCallback(
@@ -295,7 +439,9 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
         const addedMember = response.data?.member;
         const normalizedMember: GroupMember = {
           user_id: addedMember?.id ?? user.id,
-          user_name: (addedMember?.name ?? user.name ?? user.email) || user.email
+          user_name: (addedMember?.name ?? user.name ?? user.email) || user.email,
+          role: addedMember?.role ?? null,
+          is_admin: typeof addedMember?.is_admin === 'boolean' ? addedMember.is_admin : null
         };
 
         setGroupMembers(prev => {
@@ -527,34 +673,43 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
           <View style={styles.memberList}>
             {groupMembers.map(member => {
               const rawName = member.user_name?.trim() || `Member ${member.user_id}`;
-              const balanceValue = (() => {
-                if (Object.prototype.hasOwnProperty.call(balanceMap, member.user_id)) {
-                  return balanceMap[member.user_id] ?? 0;
-                }
-                const match = balances.find(row =>
-                  (typeof row.userId === 'number' && row.userId === member.user_id) ||
-                  normalizeName(row.name) === normalizeName(member.user_name)
-                );
-                return match ? match.balance : 0;
-              })();
-              const isSettled = Math.abs(balanceValue) < 0.01;
-              const balanceText = isSettled
+              const balanceValue = resolveBalanceForMember(member.user_id, member.user_name);
+              const canCurrentUserLeave = Math.abs(balanceValue) <= LEAVE_BALANCE_TOLERANCE;
+              const hasExactZeroBalance = balanceValue === 0; // admin removals require an exact zero balance
+              const balanceText = hasExactZeroBalance
                 ? 'Settled'
                 : balanceValue > 0
                 ? `${formatCurrency(balanceValue)} owed to them`
                 : `${formatCurrency(Math.abs(balanceValue))} they owe`;
+              const isCurrentUser = currentUserId !== null && member.user_id === currentUserId;
+              const isGroupCreatorMember = typeof createdById === 'number' && member.user_id === createdById;
               return (
                 <View key={member.user_id} style={styles.memberChip}>
                   <View style={styles.memberChipHeader}>
                     <Text style={styles.memberChipText}>{rawName}</Text>
-                    {isCreator && member.user_id !== currentUserId ? (
+                    {isCurrentUser ? (
+                      <TouchableOpacity
+                        style={[
+                          styles.leaveButton,
+                          (!canCurrentUserLeave || leaveLoading) ? styles.leaveButtonDisabled : null
+                        ]}
+                        onPress={handleLeaveGroup}
+                        disabled={!canCurrentUserLeave || leaveLoading}
+                        hitSlop={touchHitSlop}
+                        pressRetentionOffset={touchHitSlop}
+                      >
+                        <Text style={styles.leaveButtonLabel}>
+                          {leaveLoading ? 'Leaving...' : 'Leave group'}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : canManageMembers && !isGroupCreatorMember ? (
                       <TouchableOpacity
                         style={[
                           styles.removeButton,
-                          (!isSettled || removeLoadingId === member.user_id) ? styles.removeButtonDisabled : null
+                          (!hasExactZeroBalance || removeLoadingId === member.user_id) ? styles.removeButtonDisabled : null
                         ]}
                         onPress={() => handleRemoveMember(member)}
-                        disabled={!isSettled || removeLoadingId === member.user_id}
+                        disabled={!hasExactZeroBalance || removeLoadingId === member.user_id}
                         hitSlop={touchHitSlop}
                       >
                         <Text style={styles.removeButtonLabel}>
@@ -566,7 +721,7 @@ const GroupDetailScreen: React.FC<Props> = ({route, navigation}) => {
                   <Text
                     style={[
                       styles.memberBalanceLabel,
-                      isSettled
+                      hasExactZeroBalance
                         ? styles.memberSettled
                         : balanceValue > 0
                         ? styles.memberOwed
@@ -809,6 +964,19 @@ const styles = StyleSheet.create({
   },
   memberSettled: {
     color: '#2563eb'
+  },
+  leaveButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    backgroundColor: '#1d4ed8'
+  },
+  leaveButtonDisabled: {
+    backgroundColor: '#93c5fd'
+  },
+  leaveButtonLabel: {
+    color: '#f8fafc',
+    fontWeight: '700'
   },
   removeButton: {
     paddingVertical: 6,

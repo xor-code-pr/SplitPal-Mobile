@@ -1,6 +1,8 @@
 export type GroupMember = {
   user_id: number;
   user_name: string;
+  role?: string | null;
+  is_admin?: boolean | null;
 };
 
 export type Group = {
