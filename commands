@@ -8,9 +8,11 @@ set ANDROID_HOME=C:\Users\purne\AppData\Local\Android\Sdk
 set EXPO_PUBLIC_API_BASE_URL=http://10.0.2.2:7071/api
 npm run android
 
-
+#in local wifi
 set EXPO_PUBLIC_API_BASE_URL=http://192.168.29.15:7071/api
-set EXPO_PUBLIC_API_BASE_URL=https://stamp-moses-hall-tamil.trycloudflare.com/api
+
+#with own domain
+set EXPO_PUBLIC_API_BASE_URL=https:////api.puruworld.online/api
 # for apk update in eas.json
 
 #web UI
